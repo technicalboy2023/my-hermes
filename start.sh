@@ -761,17 +761,12 @@ while true; do
     start_jupyter
   fi
 
-  echo "Launching Hermes gateway..."
-  (hermes gateway run 2>&1 | tee -a "$HERMES_HOME/logs/gateway.log") &
-  GATEWAY_PID=$!
-
+  # In Hermes v0.16+, the gateway is auto-started and supervised by s6-overlay.
+  # We just wait for it to be ready.
   ready=false
   for ((i=0; i<GATEWAY_READY_TIMEOUT; i++)); do
     if (echo > "/dev/tcp/127.0.0.1/${GATEWAY_API_PORT}") 2>/dev/null; then
       ready=true
-      break
-    fi
-    if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
       break
     fi
     sleep 1
@@ -779,32 +774,13 @@ while true; do
 
   if [ "$ready" != "true" ]; then
     echo ""
-    echo "Hermes gateway failed to expose the API health port. Last 40 log lines:"
-    echo "----------------------------------------"
-    tail -40 "$HERMES_HOME/logs/gateway.log" || true
+    echo "Hermes s6 gateway failed to expose the API health port within $GATEWAY_READY_TIMEOUT seconds."
     exit 1
   fi
 
-  # Start sync loop (only once — shared across all gateway restarts)
+  # Start sync loop (only once)
   start_background_sync_once
 
-  set +e
-  wait "$GATEWAY_PID"
-  GATEWAY_EXIT_CODE=$?
-  set -e
-
-  # Sync state before restart
-  if [ -n "${HF_TOKEN:-}" ]; then
-    echo "Gateway exited — syncing state before restart..."
-    python3 "$APP_DIR/hermes-sync.py" sync-once || echo "Warning: sync failed."
-  fi
-
-  GATEWAY_RESTART_COUNT=$((GATEWAY_RESTART_COUNT + 1))
-  if [ "$GATEWAY_MAX_RESTARTS" != "0" ] && [ "$GATEWAY_RESTART_COUNT" -ge "$GATEWAY_MAX_RESTARTS" ]; then
-    echo "Gateway exited (code ${GATEWAY_EXIT_CODE}); restart limit (${GATEWAY_MAX_RESTARTS}) reached."
-    exit "$GATEWAY_EXIT_CODE"
-  fi
-
-  echo "Gateway exited (code ${GATEWAY_EXIT_CODE}); restarting in ${GATEWAY_RESTART_DELAY}s..."
-  sleep "$GATEWAY_RESTART_DELAY"
+  # Just sleep and let the loop monitor health-server and jupyter every 5 seconds
+  sleep 5
 done

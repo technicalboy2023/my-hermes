@@ -363,6 +363,11 @@ function proxyRequest(
     "x-forwarded-host": req.headers.host || "",
     "x-forwarded-proto": req.headers["x-forwarded-proto"] || "https",
   };
+  
+  // Fix CSRF for Hermes v0.16 dashboard
+  if (headers.origin) {
+    headers.origin = `http://${GATEWAY_HOST}:${targetPort}`;
+  }
 
   const proxy = http.request(
     {
@@ -984,7 +989,9 @@ const server = http.createServer(async (req, res) => {
 server.on("upgrade", (req, socket, head) => {
   const { pathname } = new URL(req.url, "http://localhost");
   const isJupyter = pathname === TERMINAL_BASE || pathname.startsWith(`${TERMINAL_BASE}/`);
-  const targetPort = isJupyter ? JUPYTER_PORT : GATEWAY_PORT;
+  // Route /api/ws and /api/events to the Dashboard (9119), otherwise Gateway (8642)
+  const isDashboardApi = pathname.startsWith('/api/');
+  const targetPort = isJupyter ? JUPYTER_PORT : (isDashboardApi ? DASHBOARD_PORT : GATEWAY_PORT);
   const ps = net.createConnection(targetPort, GATEWAY_HOST, () => {
     ps.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`);
     ps.write(`Host: ${GATEWAY_HOST}:${targetPort}\r\n`);
@@ -993,6 +1000,10 @@ server.on("upgrade", (req, socket, head) => {
     for (let i = 0; i < req.rawHeaders.length; i += 2) {
       const lower = req.rawHeaders[i].toLowerCase();
       if (["host", "x-forwarded-host", "x-forwarded-proto"].includes(lower)) continue;
+      if (lower === "origin") {
+        ps.write(`Origin: http://${GATEWAY_HOST}:${targetPort}\r\n`);
+        continue;
+      }
       ps.write(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`);
     }
     ps.write("\r\n");
