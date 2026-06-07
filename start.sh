@@ -730,62 +730,77 @@ start_background_sync_once() {
   SYNC_LOOP_PID=$!
 }
 
-start_dashboard_once
-start_jupyter
-
-# ── Gateway restart loop ──
-GATEWAY_RESTART_DELAY="${GATEWAY_RESTART_DELAY:-5}"
-GATEWAY_MAX_RESTARTS="${GATEWAY_MAX_RESTARTS:-0}"
-GATEWAY_RESTART_COUNT=0
+# ── Start gateway once (restarts if it dies) ──
+GATEWAY_PID=""
 GATEWAY_READY_TIMEOUT="${GATEWAY_READY_TIMEOUT:-120}"
 
+start_gateway_once() {
+  if [ -n "${GATEWAY_PID:-}" ] && kill -0 "$GATEWAY_PID" 2>/dev/null; then
+    return 0
+  fi
+  # In Hermes v0.16+, the gateway profile is supervised by s6-overlay, but
+  # `hermes gateway start` fails ("Not supported on this platform") inside
+  # the s6 container. We run the profile directly instead.
+  echo "Starting gateway profile via hermes gateway run..."
+  hermes gateway run > /dev/null 2>&1 &
+  GATEWAY_PID=$!
+
+  # Wait for the gateway API port to become available.
+  echo "Waiting for gateway (port ${GATEWAY_API_PORT})..."
+  local rc=1
+  for ((i=0; i<GATEWAY_READY_TIMEOUT; i++)); do
+    if (echo > "/dev/tcp/127.0.0.1/${GATEWAY_API_PORT}") 2>/dev/null; then
+      rc=0
+      break
+    fi
+    if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
+      echo "Gateway process exited prematurely."
+      break
+    fi
+    sleep 1
+  done
+  if [ "$rc" -ne 0 ]; then
+    echo ""
+    echo "Hermes gateway failed to expose the API health port within $GATEWAY_READY_TIMEOUT seconds."
+    exit 1
+  fi
+  echo "Gateway is ready on port ${GATEWAY_API_PORT}."
+}
+
+start_dashboard_once
+start_jupyter
+start_gateway_once
+start_background_sync_once
+
+# ── Monitor loop — restarts services that die unexpectedly ──
 while true; do
-  # Monitor health-server — restart if it died unexpectedly
+  # Monitor health-server
   if [ -n "${HEALTH_PID:-}" ] && ! kill -0 "$HEALTH_PID" 2>/dev/null; then
-    echo "Warning: health-server exited (PID $HEALTH_PID dead); restarting..."
+    echo "Warning: health-server exited; restarting..."
     node "$APP_DIR/health-server.js" &
     HEALTH_PID=$!
     echo "Health server restarted (PID: $HEALTH_PID)"
   fi
 
-  # Monitor Hermes dashboard — restart if it died unexpectedly
+  # Monitor Hermes dashboard
   if [ -n "${DASHBOARD_PID:-}" ] && ! kill -0 "$DASHBOARD_PID" 2>/dev/null; then
     echo "Warning: Hermes dashboard exited; restarting..."
     start_dashboard_once
   fi
 
-  # Monitor JupyterLab — restart if it died unexpectedly
+  # Monitor JupyterLab
   if [ "${DEV_MODE:-true}" != "false" ] && [ -n "${JUPYTER_PID:-}" ] && ! kill -0 "$JUPYTER_PID" 2>/dev/null; then
-    echo "Warning: JupyterLab exited (PID $JUPYTER_PID dead); restarting..."
+    echo "Warning: JupyterLab exited; restarting..."
     unset JUPYTER_PID
     start_jupyter
   fi
 
-  # In Hermes v0.16+, the gateway is supervised by s6-overlay.
-  # But on first boot, it might be in 'registered' state (not 'running').
-  # We explicitly tell s6 to start the default gateway profile.
-  echo "Ensuring default gateway is started via s6-svc..."
-  hermes gateway start || true
-
-  # Now wait for it to be ready.
-  ready=false
-  for ((i=0; i<GATEWAY_READY_TIMEOUT; i++)); do
-    if (echo > "/dev/tcp/127.0.0.1/${GATEWAY_API_PORT}") 2>/dev/null; then
-      ready=true
-      break
-    fi
-    sleep 1
-  done
-
-  if [ "$ready" != "true" ]; then
-    echo ""
-    echo "Hermes s6 gateway failed to expose the API health port within $GATEWAY_READY_TIMEOUT seconds."
-    exit 1
+  # Monitor gateway
+  if [ -n "${GATEWAY_PID:-}" ] && ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
+    echo "Warning: gateway exited; restarting..."
+    unset GATEWAY_PID
+    start_gateway_once
   fi
 
-  # Start sync loop (only once)
-  start_background_sync_once
-
-  # Just sleep and let the loop monitor health-server and jupyter every 5 seconds
   sleep 5
 done
