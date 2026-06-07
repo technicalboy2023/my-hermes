@@ -761,8 +761,13 @@ while true; do
     start_jupyter
   fi
 
-  # In Hermes v0.16+, the gateway is auto-started and supervised by s6-overlay.
-  # We just wait for it to be ready.
+  # In Hermes v0.16+, the gateway is supervised by s6-overlay.
+  # But on first boot, it might be in 'registered' state (not 'running').
+  # We explicitly tell s6 to start the default gateway profile.
+  echo "Ensuring default gateway is started via s6-svc..."
+  hermes gateway start || true
+
+  # Now wait for it to be ready.
   ready=false
   for ((i=0; i<GATEWAY_READY_TIMEOUT; i++)); do
     if (echo > "/dev/tcp/127.0.0.1/${GATEWAY_API_PORT}") 2>/dev/null; then
