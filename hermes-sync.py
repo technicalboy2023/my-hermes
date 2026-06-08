@@ -127,12 +127,7 @@ def should_exclude(rel_posix: str, path: Path) -> bool:
         return True
     if any(part in EXCLUDED_DIRS for part in parts):
         return True
-    # Exclude SQLite temporary files (shm, wal, journal)
-    if path.is_file():
-        name_lower = path.name.lower()
-        if name_lower.endswith((".db-shm", ".db-wal", ".db-journal")):
-            return True
-        try:
+    try:
             return path.stat().st_size > MAX_FILE_SIZE_BYTES
         except OSError:
             return True
@@ -176,7 +171,30 @@ def fingerprint_dir(root: Path) -> str:
     return hasher.hexdigest()
 
 
+def checkpoint_databases(root: Path) -> None:
+    """Flush WAL to main .db for all SQLite databases.
+
+    Runs PRAGMA wal_checkpoint(TRUNCATE) before snapshot so the
+    main .db file is up-to-date.  If checkpoint fails (e.g. the
+    database is busy), the WAL/.shm files are still backed up.
+    """
+    import sqlite3
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        name_lower = path.name.lower()
+        if not name_lower.endswith(".db") or name_lower.endswith(".db-shm"):
+            continue
+        try:
+            conn = sqlite3.connect(str(path), timeout=1)
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.close()
+        except Exception:
+            pass
+
+
 def create_snapshot_dir(source_root: Path) -> Path:
+    checkpoint_databases(source_root)
     staging_root = Path(tempfile.mkdtemp(prefix="huggingmes-sync-"))
     for path in sorted(source_root.rglob("*")):
         rel = path.relative_to(source_root)
