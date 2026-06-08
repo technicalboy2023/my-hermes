@@ -127,7 +127,8 @@ def should_exclude(rel_posix: str, path: Path) -> bool:
         return True
     if any(part in EXCLUDED_DIRS for part in parts):
         return True
-    try:
+    if path.is_file():
+        try:
             return path.stat().st_size > MAX_FILE_SIZE_BYTES
         except OSError:
             return True
