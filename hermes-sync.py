@@ -368,7 +368,7 @@ def sync_once(last_fingerprint: str | None = None, last_marker: tuple[int, int, 
             token=HF_TOKEN,
             commit_message=f"HuggingMes sync [{hostname}] {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
             ignore_patterns=[".git/*", ".git"],
-            allow_delete=True,  # remove stale files not in current snapshot
+            # Note: allow_delete not supported on this HF hub version
         )
         log(f"Upload successful")
     except Exception as exc:
