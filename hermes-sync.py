@@ -128,10 +128,26 @@ def should_exclude(rel_posix: str, path: Path) -> bool:
     if any(part in EXCLUDED_DIRS for part in parts):
         return True
     if path.is_file():
+        name_lower = path.name.lower()
+        # SHM is ephemeral shared memory, not needed for restore
+        if name_lower.endswith(".db-shm"):
+            return True
         try:
             return path.stat().st_size > MAX_FILE_SIZE_BYTES
         except OSError:
             return True
+    return False
+
+
+def fingerprint_exclude(rel_posix: str, path: Path) -> bool:
+    """Like should_exclude, but also skips files whose content changes
+    without reflecting real state changes (e.g. heartbeat timestamps)."""
+    if should_exclude(rel_posix, path):
+        return True
+    # channel_directory.json's updated_at changes every heartbeat;
+    # skip it in fingerprint to avoid false sync triggers.
+    if rel_posix == "channel_directory.json":
+        return True
     return False
 
 
@@ -145,7 +161,7 @@ def metadata_marker(root: Path) -> tuple[int, int, int]:
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
-        if should_exclude(rel, path):
+        if fingerprint_exclude(rel, path):
             continue
         try:
             stat = path.stat()
@@ -163,7 +179,7 @@ def fingerprint_dir(root: Path) -> str:
         return hasher.hexdigest()
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
         rel = path.relative_to(root).as_posix()
-        if should_exclude(rel, path):
+        if fingerprint_exclude(rel, path):
             continue
         hasher.update(rel.encode("utf-8"))
         with path.open("rb") as handle:
