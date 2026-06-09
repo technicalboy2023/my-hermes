@@ -26,6 +26,7 @@ from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/opt/data"))
+LOG_FILE = HERMES_HOME / "logs" / "hermes-sync.log"
 STATUS_FILE = Path("/tmp/huggingmes-sync-status.json")
 STATE_FILE = HERMES_HOME / ".huggingmes-sync-state.json"
 INTERVAL = int(os.environ.get("SYNC_INTERVAL", "600"))
@@ -87,6 +88,18 @@ EXCLUDED_TOP_LEVEL = {
 HF_API = HfApi(token=HF_TOKEN) if HF_TOKEN else None
 STOP_EVENT = threading.Event()
 _REPO_ID_CACHE: str | None = None
+
+
+def log(msg: str) -> None:
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    line = f"[{timestamp}] {msg}"
+    print(line, flush=True)
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_FILE.open("a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 
 def write_status(status: str, message: str, fingerprint: str | None = None, marker: tuple[int, int, int] | None = None) -> None:
@@ -270,10 +283,12 @@ def create_snapshot_dir(source_root: Path) -> Path:
 
 def restore() -> bool:
     if not HF_TOKEN:
+        log("Restore skipped: HF_TOKEN not set")
         write_status("disabled", "HF_TOKEN is not configured.")
         return False
 
     repo_id = resolve_backup_repo()
+    log(f"Restoring Hermes state from {repo_id}")
     write_status("restoring", f"Restoring Hermes state from {repo_id}")
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -331,15 +346,18 @@ def sync_once(last_fingerprint: str | None = None, last_marker: tuple[int, int, 
     repo_id = ensure_repo_exists()
     current_marker = metadata_marker(HERMES_HOME)
     if last_marker is not None and current_marker == last_marker:
+        log(f"Marker match — no changes ({current_marker})")
         write_status("synced", "No Hermes state changes detected (marker match).")
         return (last_fingerprint or "", current_marker)
 
     current_fingerprint = fingerprint_dir(HERMES_HOME)
     if last_fingerprint is not None and current_fingerprint == last_fingerprint:
+        log(f"Fingerprint match — no changes")
         write_status("synced", "No Hermes state changes detected (fingerprint match).")
         return (last_fingerprint, current_marker)
 
     hostname = socket.gethostname()
+    log(f"Changes detected — uploading to {repo_id}")
     write_status("syncing", f"Uploading Hermes state to {repo_id} from {hostname}")
     snapshot_dir = create_snapshot_dir(HERMES_HOME)
     try:
@@ -352,6 +370,10 @@ def sync_once(last_fingerprint: str | None = None, last_marker: tuple[int, int, 
             ignore_patterns=[".git/*", ".git"],
             allow_delete=True,  # remove stale files not in current snapshot
         )
+        log(f"Upload successful")
+    except Exception as exc:
+        log(f"UPLOAD FAILED: {exc}")
+        raise
     finally:
         shutil.rmtree(snapshot_dir, ignore_errors=True)
 
@@ -369,48 +391,60 @@ def loop() -> int:
     try:
         repo_id = resolve_backup_repo()
         write_status("configured", f"Backup loop active for {repo_id} with {INTERVAL}s interval.")
+        log(f"Backup loop configured: {repo_id} every {INTERVAL}s")
     except Exception as exc:
         write_status("error", str(exc))
-        print(f"Hermes sync error: {exc}")
+        log(f"ERROR initializing backup: {exc}")
         return 1
 
     last_fingerprint = fingerprint_dir(HERMES_HOME)
     last_marker = metadata_marker(HERMES_HOME)
+    log(f"Initial state: marker={last_marker}, fingerprint={last_fingerprint[:16]}...")
     time.sleep(INITIAL_DELAY)
-    print(f"Hermes state sync started: every {INTERVAL}s -> {repo_id}")
+    log(f"State sync loop started: every {INTERVAL}s -> {repo_id}")
 
     while not STOP_EVENT.is_set():
         try:
             last_fingerprint, last_marker = sync_once(last_fingerprint, last_marker)
         except Exception as exc:
             write_status("error", f"Sync failed: {exc}")
-            print(f"Hermes sync failed: {exc}")
+            log(f"SYNC ERROR: {exc}")
         
         # Add 10% jitter to interval to avoid synchronized commits from multiple containers
         jitter = random.uniform(0.9, 1.1)
-        if STOP_EVENT.wait(INTERVAL * jitter):
+        wait_s = INTERVAL * jitter
+        log(f"Next sync in {wait_s:.0f}s...")
+        if STOP_EVENT.wait(wait_s):
             break
+    log("Sync loop stopped.")
     return 0
 
 
 def main() -> int:
     HERMES_HOME.mkdir(parents=True, exist_ok=True)
+    log(f"HermesSync starting, args={sys.argv[1:]}")
     if len(sys.argv) < 2:
         return loop()
     command = sys.argv[1]
     if command == "restore":
-        return 0 if restore() else 1
+        log("Running restore...")
+        rc = 0 if restore() else 1
+        log(f"Restore finished: rc={rc}")
+        return rc
     if command == "sync-once":
         try:
+            log("Running sync-once...")
             sync_once()
+            log("Sync-once finished")
             return 0
         except Exception as exc:
             write_status("error", f"Shutdown sync failed: {exc}")
-            print(f"Hermes sync: shutdown sync failed: {exc}")
+            log(f"Sync-once FAILED: {exc}")
             return 1
     if command == "loop":
+        log("Starting loop...")
         return loop()
-    print(f"Unknown command: {command}", file=sys.stderr)
+    log(f"Unknown command: {command}")
     return 1
 
 
